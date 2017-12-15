@@ -37,10 +37,10 @@ html
               li.nav__item: a.nav__link(href="/login", class=(currentPath.startsWith('/login') ? 'nav__link--active' : '')) Log In
 
     block messages
-      if locals.flashes
+      if flashes
         .inner
           .flash-messages
-            - const categories = Object.keys(locals.flashes)
+            - const categories = Object.keys(flashes)
             each category in categories
               each message in flashes[category]
                 .flash(class=`flash--${category}`)
