@@ -5,12 +5,15 @@
   * [helper](#helper)  
   * [mixins](#mixins)  
 * [MVC pattern](#mvc-pattern)  
-* [create store](#create-store)  
-  * [create model with mongoose](#create model with mongoose)  
+* [Store](#store)  
+  * [create store model with mongoose](#create-store-model-with-mongoose)  
   * [get add store page](#get-add-store-page)  
   * [post add store with async await](#post-add-store-with-async-await)  
   * [flash message](#flash-message)  
-  * [query db for store](#query-db-for-store)  
+  * [query db for stores](#query-db-for-stores)  
+  * [find and edit](#find-and-edit)  
+  * [add timestamp and location to Model](#add-timestamp-and-location-to-model)  
+  * [geolocation with google map](#geolocation-with-google-map)  
   
 
 ## Setting up mongo  
@@ -177,8 +180,8 @@ const storeController = require('../controllers/storeController');
 router.get('/', storeController.homePage);
 ```
 
-## Create store
-### create model with mongoose
+## Store
+### create store model with mongoose
 * create model file `models/store.js`  
 * define and config mongo schema with mongoose(package to interface with mongo)  
 ```js
@@ -236,6 +239,9 @@ module.exports = mongoose.model('Store', storeSchema);
 // Singleton mongo model connection
 require('./models/Store');
 ```
+How errorHandler(`errorHandlers.js`) is handled from request:
+> when set model schema `required` field  to `true` or overwrite with custom string, if request comes in without those required field, in `app.js` the error handler `catchErrors` which wrapped in routes will call `next`.  <br><br> 
+Then `errorHandlers.flashValidationErrors` function will check for request errors. If there is an error, will iterate and display errors as flash messages and redirect back to previous request. Alternatively, if there is no error, will call next and pass `error` to other errorHandler.
 
 ### get add store page
 * create view, route and controller  
@@ -441,14 +447,16 @@ exports.getStores = async (req, res) => {
 }
 ```
 
-* create reuseable mixin then loop and display in `stores` view
+* create reuseable mixin UI then loop and display stores in `stores` view
 ```pug
 <!-- views/mixins/_store.pug -->
 mixin store(store={})
   .store
     .store__hero
       .store__actions
-        button soon
+        .store__action.store__action--edit
+          a(href=`/stores/${store._id}/edit`)
+            != h.icon('pencil')
       img(src=`/uploads/${store.photo || 'store.png'}`)
       h2.title
         a(href=`/store/${store.slug}`)= store.name
@@ -470,4 +478,193 @@ block content
         +store(store)
 ```
 
-### 
+> tips: `!=` in pug will tell pug to render and escape html
+
+### find and edit 
+* include ui like for edit  
+```pug
+.store__action.store__action--edit
+  a(href=`/stores/${store._id}/edit`)
+    != h.icon('pencil')
+```
+
+* Implement the route for GET 
+```js
+// router.js
+// other code...
+
+router.get("/stores/:id/edit", catchErrors(storeController.editStore));
+```
+
+* Implement controller  
+```js
+// storeController.js
+// other code...
+const mongoose = require('mongoose');
+const Store = mongoose.model('Store');
+
+exports.editStore = async (req, res) => {
+  // find the store with ID from params url
+  const store = await Store.findOne({ _id: req.params.id });
+
+  // render edit form, pass query from DB to view
+  res.render('editStore', { title: `Edit ${store.name}`, store }); // ES6 store: store
+};
+```
+
+* modify mixin `_storeForm` to show the value and config route
+```pug
+<!-- if no store pass in value is default to {} -->
+mixin storeForm(store={})
+  form(action=`/add/${store.id || ''}` method="POST" class="card")
+    label(for="name") Name
+    input(type="text" name="name" value=store.name)
+    label(for="description") Description
+    textarea(name="description")= store.description
+    - const tags = ["restaurant", "Wifi", "cheap", "cash only", "credit card"];
+    - const storeTags = store.tags || [];
+    ul.tags
+      each tag in tags
+        - const checked = storeTags.includes(tag);
+        .tag.tag__choice
+          input(type="checkbox" id=tag, value=tag name="tags" checked=checked)
+          label(for="choice")= tag
+    input(type="submit" value="Save" class="button")  
+```
+
+* Implement the route for POST
+```js
+// route
+// ...
+router.post("/add/:id/", catchErrors(storecontroller.updateStore));
+```
+
+* Implement the controller to handle POST
+```js
+// storeController
+// ...
+exports.updateStore = async (req, res) => {
+  // find store from db with params and update in one method
+  // Model.findOneAndUpdate({ query }, data, [options]);
+  const store = await Store.findOneAndUpdate({ _id: req.params.id }, req.body, {
+    new: true, // return updated data not old one from mongo
+    runValidators: true // validates the required field in schema not only on create but on update as well
+  }).exec(); // method to ensure execution for mongo
+
+  // flash
+  req.flash("success", `Successfully updated <a href=/stores/${store.slug}><strong>${store.name}</strong></a>`);
+
+  // redirect
+  res.redirect(`/add/${store._id}/edit`);
+};
+```
+
+### add timestamp and location to Model
+* implement more field in Store model  
+```js
+// models/Store.js
+// ...other code
+const storeSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    trim: true,
+    required: 'Please enter a store name', //overwrite mongoose default errors with message
+  },
+  slug: String,
+  description: {
+    type: String,
+    trim: true
+  },
+  tags: [String],
+  // add new fields below
+  created: {
+    type: Date,
+    default: Date.now()
+  },
+  // nested attrbites store in db
+  location: {
+    type: {
+      type: String,
+      default: 'Point' // will located point map in mongo compass GUI
+    },
+    coordinates: [{
+      type: Number,
+      required: 'Must have coordinates!'
+    }],
+    address: {
+      type: String,
+      required: 'Must have address!'
+    }
+  }
+});
+``` 
+
+> in middleware config `app.js`:  <br><br>
+`app.use(bodyParser.urlencoded({ extended: true }))` will allow us to use rich objects and arrays to retrive data from db or save db into db as nested attributes <br><br>
+For example, the string `person[name]=bobby` and `person[age]=3` will be converted to:
+
+```js 
+person: {
+    name: 'bobby',
+    age: 3
+}
+```
+
+* implement new model fields in view
+```pug
+<!-- _storeForm.pug -->
+mixin storeForm(store={})
+  form(action=`/add/${store.id || ''}` method="POST" class="card")
+    //- other field
+    //- add address
+    label(for="address") Address
+    input(type="text" id="address" name="location[address]" value=(store.location && store.location.address))
+    label(for="lng") Address Lng
+    input(type="text" id="lng" name="location[coordinates][0]" value=(store.location && store.location.coordinates[0]) required)
+    label(for="lat") Address Lat
+    input(type="text" id="lat" name="location[coordinates][1]" value=(store.location && store.location.coordinates[1]) required)
+    //- other field
+```
+
+### geolocation with google map
+> will use `bling.js` library which convert Javascipt DOM query to `$` and `$$`, additionally convert `addEventListener` to `on`
+
+* include `layout` view with google API  
+
+* implement client side using google place api to autocomplete when type in address  
+
+* wrap google API with custom module to insert lat ang long coordinates in input with enter address  
+```js
+// public/javascripts/delicious-app.js
+import { $, $$ } from './modules/bling';
+import autocomplete from './modules/autocomplete';
+
+// call imported function from custom module autocomplete and pass in input DOM
+autocomplete($('#address'), $('#lat'), $('#lng'));
+```
+```js
+// public/javascripts/modules/autocomplete.js
+function autocomplete(address, lat, lng) {
+  if (!address) { return; } // no input
+
+  const addresses = new google.maps.places.Autocomplete(address); // google api
+
+  // google API; addListener, place_changed, getPlace()
+  addresses.addListener('place_changed', () => {
+    // get google place obj from google API
+    const place = addresses.getPlace();
+
+    // insert lat and lng input dom with google place API
+    lat.value = place.geometry.location.lat();
+    lng.value = place.geometry.location.lng();
+  });
+
+  // prevent enter to submit form
+  address.on('keydown', (e) => {
+    if (e.keyCode === 13) { e.preventDefault(); };
+  });
+}
+
+// export as module
+export default autocomplete;
+```
