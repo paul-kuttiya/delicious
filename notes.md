@@ -10,10 +10,11 @@
   * [get add store page](#get-add-store-page)  
   * [post add store with async await](#post-add-store-with-async-await)  
   * [flash message](#flash-message)  
-  * [query db for stores](#query-db-for-stores)  
+  * [query db for stores and get stores page](#query-db-for-stores-and-get-stores-page)  
   * [find and edit](#find-and-edit)  
   * [add timestamp and location to Model](#add-timestamp-and-location-to-model)  
   * [geolocation with google map](#geolocation-with-google-map)  
+  * [upload and resizing image](#upload-and-resizing-image)  
   
 
 ## Setting up mongo  
@@ -429,7 +430,7 @@ exports.createStore = async (req, res) => {
 
 > Flash only works when session is implemented, and is a part of session  
 
-### query db for store
+### query db for store and get stores page
 * create controller, query the db with mongoose asyncronously  
 
 > don't forget to wrap error handler in `routes` for any controller that use async callback 
@@ -626,6 +627,17 @@ mixin storeForm(store={})
     //- other field
 ```
 
+* type of `'Point'` will lose when user update query, in controller force to update location type to `'Point'`
+```js
+// StoreController.js
+exports.updateStore = async (req, res) => {
+  // force update location to Point
+  req.body.location.type = 'Point';
+
+  // other code...
+}
+```
+
 ### geolocation with google map
 > will use `bling.js` library which convert Javascipt DOM query to `$` and `$$`, additionally convert `addEventListener` to `on`
 
@@ -667,4 +679,124 @@ function autocomplete(address, lat, lng) {
 
 // export as module
 export default autocomplete;
+```
+
+### upload and resizing image
+* use middleware `multer` to upload the file and `jimp` to resize the file  
+
+* store image NAME.EXT in MongoDB, store ACTUAL image file in server(or cloud)
+
+* file needs to be miltipart when uploaded, modify the form  
+```pug
+//- _storeForm.pug
+mixin storeForm(store={})
+  form(action=`/add/${store._id || ''}` method="POST" class="card" enctype="multipart/form-data")
+  //- ...
+``` 
+
+* uploading file process  
+  * use `multer` middleware to handle multipart(file) upload request in controller  
+  * `multer` will read into temp memory as buffer  
+  * then async with `jimp`(implement with promise) for resizing  
+    * detect file type with mimetype and rename file, then point the file name to `req.body.fieldName`, which will be save in MongoDB when controller processed  
+    * then assign `photo` variable to await for jimp's resolve from reading the buffer  
+    * after resolve from await buffer reading, next await for `photo` to resize  
+    * await for `photo` to write to the image save path   
+```js
+//storeController.js
+//...
+const multer = require('multer'); // save file to server
+const jimp = require('jimp'); // resize
+const uuid = require('uuid'); // unique id for anything
+const imgPath = "./public/uploads";
+
+// config multer middleware
+const multerOptions = {
+  storage: multer.memoryStorage(), // store into memory, not in server disk
+  fileFilter(req, file, next) {
+    const isPhoto = file.mimetype.startsWith('image/'); // server side validation image with mimetype
+    if(isPhoto) {
+      // next(err); pass on error
+      // next(null, true); no errors, pass on true 
+      next(null, true);
+    } else {
+      next({ message: 'File is not allowed!' }, false); // error obj, pass on false
+    }
+  }
+}
+
+// set middleware to accpet a single file with the A 'name'(name on req.body from form 'name'), can check for multiple fields as well(array).
+// The single file will be stored in req.file
+exports.upload = multer(multerOptions).single('photo');
+
+// resize asynchronously 
+exports.resize = async (req, res, next) => {
+  // multer read and process request as file obj in req.file
+  // use req.file to check if there is any file being attached
+  if (!req.file) {
+    // no any file attached, skip to the next middleware
+    return next();
+  }
+
+  // check the mime type, rename file, and store that name to mongo DB
+  const ext = req.file.mimetype.split('/')[1];
+  // assign req.body.photo to filename.ext string, will be posted with other requested fields in controller
+  const fileName = req.body.photo = `${uuid.v4()}.${ext}`; 
+
+  // next we concern with saving actual file to db
+  // read from temp memory and resize with jimp
+  const photo = await jimp.read(req.file.buffer);
+  // resize the photo obj, width, height
+  await photo.resize(800, jimp.AUTO);
+  // write file to server path --> file.write(filePath)
+  await photo.write(`imgPath/${fileName}`);
+}
+
+// controllers ...
+```  
+
+* modify form to upload photo  
+```pug
+//- _storeForm.pug
+mixin storeForm(store={})
+  form(action=`/add/${store.id || ''}` method="POST" class="card" enctype="multipart/form-data")
+    //- other field
+    label(for="photo") Photo
+    //- client side validation
+    input(type="file" name="photo" id="photo" accept="image/gif, image/png, image/jpeg")
+    - if store.photo
+      img(src=`uploads/${store.photo}` alt=store.name width=200)
+```
+
+* add Model schema to store fileName in DB
+```js
+// models/Store.js
+// ...
+const storeSchema = new mongoose.Schema({
+  {
+    //...
+  },
+  photo: String
+}); 
+```
+
+* implement middleware in routes
+```js
+// routes/index.js
+// ...
+// express router API --> router.post('path', [middleware..], req, res, [next] => {...})
+
+// implement upload and resize middleware for create
+router.post('/add', 
+  storeController.upload, 
+  catchErrors(storeController.resize), // async
+  catchErrors(storeController.createStore) // async
+);
+
+// implement upload and resize middleware for update store
+router.post('/add/:id', 
+  storeController.upload, 
+  catchErrors(storeController.resize), // async
+  catchErrors(storeController.updateStore) // async
+);
 ```
