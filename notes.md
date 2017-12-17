@@ -15,7 +15,12 @@
   * [add timestamp and location to Model](#add-timestamp-and-location-to-model)  
   * [geolocation with google map](#geolocation-with-google-map)  
   * [upload and resizing image](#upload-and-resizing-image)  
-  
+  * [store show page](#store-show-page)  
+  * [unique slug with mongoose hook](#unique-slug-with-mongoose-hook)  
+* [tags](#tags)  
+  * [data aggregation pipeline and tags page](#data-aggregation-pipeline-and-tags-page)  
+  * [Multiple Query Promises with AsyncAwait](#multiple-query-promises-with-async-await)  
+
 
 ## Setting up mongo  
 * download mongo community server from mongodb.com  
@@ -800,3 +805,208 @@ router.post('/add/:id',
   catchErrors(storeController.updateStore) // async
 );
 ```
+
+### store show page
+* add route to get store show page  
+```js
+// routes/index.js
+// ...
+router.get('store/:slug', catchErrors(storeController.getStoreBySlug));
+```
+
+* implement controller for store show  
+```js
+// storeController.js
+// ...
+
+exports.getStoreBySlug = async (req, res) => {
+  // query db for a store
+  const store = await Store.findOne({ slug: req.params.slug });
+
+  // if slug url does not exists, return next which will reach notFound handler; 404
+  if (!store) { return next(); };
+
+  // render template with store and pass in store query from db
+  res.render('store', { store, title: store.name });
+}
+```
+
+* create view to display data from controller, and include a static google map from `helpers.js`    
+```pug
+//- views/store.pug
+extends layout
+
+block content
+  .single
+    .single__hero
+      img.single__image(src=`/uploads/${store.photo || 'store.png'}`)
+      h2.title.title--single
+        a(href=`/stores/${store.slug}`)= store.name
+  
+  .single__details.inner
+    img.single__map(src=h.staticMap(store.location.coordinates))
+    p.single__location= store.location.address
+    p= store.description
+
+    - if store.tags
+      ul.tags
+        each tag in store.tags
+          li.tag
+            a.tag__link(href=`/tags/${tag}`)
+              span.tag__text ##{tag}
+```
+
+> pug string interpolate with `#{}`, can combine other string with the interpolation; `tags #{tag}`
+
+### unique slug with mongoose hook
+* in Model use `mongoose` pre-save hook to schema to check and create new slug if existed  
+```js
+// models/Store.js
+// ...
+
+// need `this` context; use ES5
+storeSchema.pre('save', async function(next) {
+  if (!this.isModified('name') {
+    return next();
+  });
+
+  this.slug = slug(this.name);
+
+  // create regex obj to check for matching in DB
+  const slugRegEx = new RegExp(`^(${this.slug})((-[0-9]*$)?)$`, 'i');
+
+  // find slug that match from database with regex, refer `this.constructor` as model, since it is yet not created
+  const matched = await this.constructor.find({ slug: slugRegEx });
+
+  // match will return array of query if found
+  if (matched.length) {
+    // increase the slug number by one 
+    this.slug = `${this.slug}-${matched.length + 1}`
+  }
+
+  // go to next middleware
+  next();
+});
+```
+## tags
+### data aggregation pipeline and tags page
+> Unlike `relational database` `mongoDB` does not have table and `foreign key` to establish tables relationship for data query.  <br><br>
+Use advance query: `data aggregation pipeline` which operations group values from multiple documents together using `mongodb aggregate methods`, and can perform a variety of operations on the grouped data to return a single result 
+
+* create routes for tag page  
+```js
+// routes/index.js
+// ...
+router.get('/tags', catchErrors(storeController.getStoresByTag));
+router.get('/tags/:tag', catchErrors(storeController.getStoresByTag));
+```
+
+* implement controller  
+```js
+// storeController.js
+// ...
+exports.getStoreByTag = async (req, res) => {
+  // create custom Model query method `getTagsList` and implement in model
+  const tags = await Store.getTagsList();
+}
+```
+
+* implement `getTagList` and add custom query method in Model  
+```js
+// models/Store.js
+// ...
+
+// add custom method to schema, use schema.statics
+// use ES5 to get schema context; ES6 'this' context is parent scope
+storeSchema.statics.getTagsList = function() {
+  //  aggregate method, pipeline multiple aggregate operators in an array
+  // pass each pipeline as object in array
+  return this.aggregate([
+    // specify the field path operation with '$field'
+    // $unwind breaks array data into single attributes 
+    { $unwind: '$tags' }, 
+    // group in "id: tags", and add count field which sum(add) each data += 1 --> { "id: tags, "count": 3" } 
+    { $group: { _id: '$tags', count: { $sum: 1 } }},
+    // sort by count descending: -1, ascending: 1
+    { $sort: { count: -1 } }
+  ]);
+}
+```
+
+* implement data to render in controller  
+```js
+// storeController.js
+// ...
+exports.getStoreByTag = async (req, res) => {
+  // create custom Model query method `getTagsList` and implement in model
+  const tags = await Store.getTagsList();
+
+  // pass current tag params for active UI in view
+  const active = req.params.tag
+
+  res.render('tag', { tags, active, title: 'Tags' });
+}
+```
+
+* implement view  
+```pug
+//- views/tags.pug
+extends layout
+
+block content
+  .inner
+    h2 #{active || 'Tags'}
+    ul.tags
+      each tag in tags
+        li.tag
+          a.tag__link(href=`/tags/${tag._id}` class=(tag._id === active ? 'tag__link--active' : ''))
+            span.tag__text= tag._id
+            span.tag__count= tag.count
+```
+
+### Multiple Query Promises with async await
+* Query stores for a specific tag  
+
+* need to get promise resolves for tags and stores in one controller  
+
+* use `async` `await` `Promise.all` which will return array of resolves  
+```js
+// storeController.js
+// ...
+
+exports getStoreByTag = async(req, res) => {
+  const tag = req.params.tag;
+
+  // define async promises; each method is already implement with async Promise
+  // find matched tag array or return all tags in db; use when has no tag params and would like to return all tags
+  const storePromise = Store.find({ tags: (tag || { $exists: true }) });
+  const tagsPromise = Store.getTagsList();
+
+  // await for all Promise to return resolves at the same time
+  const [stores, tags] = await Promise.all([storePromise, tagsPromise]);
+
+  // pass all data to view
+  res.render('tag', { stores, tags, tag, title: 'Tags' });
+}
+```
+
+* implement in view and use mixins `_store` as partials to render `store` data  
+```pug
+extends layout
+
+include mixins/_store
+
+block content
+  .inner
+    h2 #{active || 'Tags'}
+    ul.tags
+      each tag in tags
+        li.tag
+          a.tag__link(href=`/tags/${tag._id}` class=(tag._id === active ? 'tag__link--active' : ''))
+            span.tag__text= tag._id
+            span.tag__count= tag.count
+
+    .stores
+      each store in stores
+        +store(store)
+``` 
