@@ -20,6 +20,14 @@
 * [tags](#tags)  
   * [data aggregation pipeline and tags page](#data-aggregation-pipeline-and-tags-page)  
   * [Multiple Query Promises with AsyncAwait](#multiple-query-promises-with-async-await)  
+* [users](#users)  
+  * [create users db and get form](#create-users-db-and-get-form)  
+  * [validate user registration](#validate-user-registration)  
+  * [post and save user to db](#post-and-save-user-to-db)  
+  * [auth-and-login](#auth-and-login)  
+  * [logout](#logout)  
+  * [gravatar](#gravatar)  
+  * [protecting route](#protecting-route)  
 
 
 ## Setting up mongo  
@@ -1009,4 +1017,345 @@ block content
     .stores
       each store in stores
         +store(store)
-``` 
+```
+
+## users
+### create users db and get form
+* create route for login and register    
+```js
+// routes/index.js
+// ...
+const userController = require('../controllers/userController');
+
+router.get('/login', userController.login);
+router.get('/register', userController.new);
+
+module.exports = router;
+```
+
+* create user controller  
+```js
+// controllers/userController.js
+const mongoose = require('mongoose');
+
+exports.login = (req, res) => {
+  res.render('login', { title: "login" });
+};
+
+exports.new = (req, res) => {
+  res.render('register', { title: "register" });
+};
+```
+
+* create partial mixins for a form, then implement in user login and register view template  
+```pug
+//- views/mixins/_loginForm.pug
+mixin loginForm()
+  form.form(action="/login" method="POST")
+    label(for="email") Email
+    input(type="email" name="email")
+    label(for="password") Password
+    input(type="password" name="password")
+    input.button(type="submit" value="Log In")    
+```
+```pug
+//- login.pug
+extends layout
+
+include mixins/_loginForm
+
+block content
+  .inner
+    h2= title
+    +loginForm()
+```
+```pug
+//- views/mixins/_registerForm.pug
+mixin loginForm()
+  form.form(action="/register" method="POST")
+    label(for="name") Name
+    input(type="text" name="name" required)
+    label(for="email") Email
+    input(type="email" name="email" required)
+    label(for="password") Password
+    input(type="password" name="password")
+    label(for="password-confirm") Confirm password
+    input(type="password" name="password-confirm")
+    input.button(type="submit" value="Register")    
+```
+```pug
+//- register.pug
+extends layout
+
+include mixins/_registerForm
+
+block content
+  .inner
+    h2= title
+    +registerForm()
+```
+
+* create use model, then import model once(singleton) in `start.js`    
+```js
+// models/User.js
+const mongoose = require('mongoose');
+const Schema = mongoose.Schema;
+mongoose.Promise = global.Promise;
+
+const md5 = require('md5');
+// validate middleware
+const validator = require('validator');
+// by default unique and other field in mongo schema will give ugly errors, use this middleware to display nicer errors
+const mongodbErrorHandler = require('mongoose-mongodb-errors');
+// use as a plugin for mongoose for building username and password for passport
+// define User as prefered. Passport-Local Mongoose will add a username, hash and salt field to store the username, the hashed password and the salt value when posted with async User.register(obj, password) method
+const passportLocalMongoose = require('passport-local-mongoose');
+
+const User = new Schema({
+  email: {
+    type: String,
+    // will give ugly errors, use mongodbErrorHandler middleware for better errors
+    unique: true,
+    lowercase: true,
+    trim: true,
+    // server validation using validator middleware
+    validate: [validator.isEmail, "Invalid Email!"],
+    // set require with error message
+    required: "Email is required!" 
+  },
+  name: {
+    type: String,
+    trim: true,
+    required: "Name is required!"
+  }
+});
+
+// add mongoose plugin with passport authenticate middleware API for User schema model
+// set option usernameField to User's email
+User.plugin(passportLocalMongoose, { usernameField: 'email' });
+
+// middleware to make error nicer
+User.plugin(mongodbErrorHandler);
+
+module.exports = mongoose.model('User', User);
+```
+
+### validate user registration
+* create a middleware which will run before routes, validates the registration on server side, and handle register form submit's request  
+```js
+// lib/validateRegister.js
+const validateRegister = (req, res, next) => {
+  // method from express-validator middleware in app.js, remove html and js script before post
+  req.sanitizeBody('name');
+  // check body field
+  req.checkBody('name', 'must have name').notEmpty();
+  req.checkBody('email', 'email not valid').isEmail();
+
+  // normalize email instead of using default validation
+  // for example, if not normalized, 'abc.def@gmail.com' and 'abcdef@gmail.com' would validate as the same email
+  req.sanitizeBody('email').normalizeEmail({
+    remove_dots: false,
+    remove_extension: false,
+    gmail_remove_subaddress: false
+  });
+
+  req.checkBody('password', 'Password cannot be blank!').notEmpty();
+  req.checkBody('password-confirm', 'Password confirmed cannot be blank!').notEmpty();  
+
+  // check password eq password confirm
+  req.checkBody('password-confirm', 'Passwords are not matched!').equals(req.body.password);
+
+  // express-validator middleware will get all validators method above and assign to errors
+  const errors = req.validationErrors();
+
+  // check for errors and render flash
+  //
+  if (errors) {
+    // handle error for flash manually, not included in errorHandler middleware
+    req.flash('error', errors.map(err => {err.msg}));
+
+    // render the form with flashes and send back the same data to page body if error 
+    res.render('register', { title: 'Register', body: req.body, flashes: req.flash() });
+    return; // return out of middleware if error;
+  };
+
+  next(); // no errors process to next middleware
+}
+
+exports default validateRegister;
+```
+
+### post and save user to db
+* create post route for user register and then logged user in 
+```js
+// route
+router.post('/register',
+  userController.validateRegister,
+  userController.create,
+)
+```
+
+* implement userController  
+```js
+// userController.js
+const mongoose = require('mongoose');
+const User = mongoose.model('User'); // already imported in start.js
+
+// use async await for non supported libaray
+const promisify = require('es6-promisify');
+
+exports.create = async (req, res, next) => {
+  const user = new User({ email: req.body.email, name: req.body.name });
+  
+  // convert promise to async for lib that is not yet supported; promisify(method, bindContext)
+  // bindContext is not needed if method is the function in the same scope
+  // User.register(obj, password) is a method provided with passportLocalMongoose which binds to Model context
+  const register = promisify(User.register, User); // return function
+  // now register is an async method which can be call with await
+  await register(user, req.body.password); // register method will store user attributes and encrypted password
+
+  next(); // pass to login authentication; auth controller
+};
+```
+
+### auth and login
+* create controller middleware for auth  
+```js
+// authController.js
+const passport = require('passport'); // lib for login
+
+// use passport strategy middleware; define how to log user in
+// can be facebook, google, github or local
+// if authentication was successful, `req.user` contains the authenticated user, which then will be stored in res.locals.user in app.js
+exports.login = passport.authenticate('local', {
+  // option for config
+  failureRedirect: '/login',
+  failureFlash: 'Wrong username or password',
+  successRedirect: '/',
+  successFlash: "Welcome back!"
+});
+```
+
+* implement auth in the route  
+```js
+// route
+// ...
+
+const userController = require('../controllers/userController');
+const authController = require('../controllers/authController');
+
+router.post('/register', 
+  // validate field
+  userController.validateRegister,
+  // create user in db
+  userController.create,
+  // log user in
+  authController.login
+)
+```
+
+* create passport config for logged in user in `handlers/passport.js`  
+```js
+// handlers/passport.js
+const passport = require('passport');
+const mongoose = require('mongoose');
+const User = mongoose.model('User');
+
+// provided by mongoose passport plugin
+passport.use(User.createStrategy());
+
+// what to do with user
+passport.serializeUser(User.serializeUser());
+passport.deserializeUser(User.deserializeUser());
+```
+
+* import passport config in `app.js`  
+```js
+// app.js
+// ...
+require('./handlers/passport');
+```
+
+* by using passport and implementing `req.user = req.user.local` in `app.js`, this will provide use log in user auth data in template  
+
+* in template render login user condition  
+```pug
+//- sample render for user
+- if user
+  .nav
+    .name user.name
+    a(href="logout")
+- else
+  .nav
+    a(href="/register")    
+    a(href="/login")
+```
+
+* create post route for login  
+```js
+// route
+router.post('/login', authController.login);
+```
+
+### logout
+* implement logout in `authController`  
+```js
+exports.logout = (req, res) => {
+  req.logout();
+  req.flash('success', 'Thank you, logging out!');
+  res.redirect('/');
+}
+```
+
+* create route to handle logout  
+```js
+// route
+router.get('/logout', authController.logout);
+```
+
+### gravatar
+* use gravatar(cloud service checking email and retrive stored image as avatar)  
+
+* implement user model with mongoose `virtual field`
+```js
+// User.js
+// ...
+// use to retrive gravatar with user email; without exposing the actual email
+// will hash with md5 and retrive from gravatar server
+const md5 = require('md5');
+
+
+// schema.virtual('field').get(function() { return ... });
+// schema.virtual('field').set(function() { return ... });
+
+User.virtual('gravatar').get(function() {
+  // hash with email
+  // use ES5 to get `this` context from User
+  const hash = md5(this.email);
+  return `https://gravatar.com/avatar/${hash}?s=200`;
+});
+```
+
+> Mongo Virtuals are document properties that you can get and set but that do not get persisted to MongoDB. The getters are useful for formatting or combining fields, while setters are useful for de-composing a single value into multiple values for storage.
+
+### protecting route
+* protecting route from unauthorized user  
+```js
+// authController.js
+// ...
+express.isLoggedIn = (req, res, next) => {
+  // check if user is in session; isAuthenticated is a method provided by passport
+  if (req.isAuthenticated()) {
+    return next(); // go to next middleware
+  }
+  // flash and redirect
+  req.flash('error', 'not a user');
+  res.redirect('/login');
+}
+```
+
+* implement in route  
+```js
+// route
+router.get('/add', authController.isLoggedIn, storeController.addStore);
+```
